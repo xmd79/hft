@@ -47,6 +47,8 @@ MIN_ORDER_SIZE = 0.001             # Minimum quantity (BTC) allowed
 SLEEP_INTERVAL = 5                 # Seconds sleep between iterations
 WINDOW_SIZE = 5                    # Number of pseudo-candles used for detection
 BASE_CANDLE_TIME_LIMIT = 45        # Max seconds for base candles duration
+MIN_BALANCE_THRESHOLD = 0.5        # Minimum balance to allow trading
+TRADE_COOLDOWN_SECONDS = 60        # Cooldown period between same pattern trades
 
 # Backtesting parameters
 BACKTEST_MODE = False              # Set to True to run in backtest mode
@@ -84,6 +86,7 @@ AUTH = False                       # Whether API keys were provided
 backtest_results = []              # Store backtest results
 market_regime = "ranging"          # Current market regime (trending/ranging)
 volatility_state = "normal"        # Current volatility state (low/normal/high)
+last_pattern_time = {}             # Track last pattern execution time for cooldown
 
 # For adaptive thresholds
 volatility_history = deque(maxlen=50)  # Store recent volatility measurements
@@ -98,6 +101,7 @@ minus_di_values = deque(maxlen=ADX_PERIOD)
 message_queue = asyncio.Queue(maxsize=1000)  # Queue for processing messages
 processing_task = None  # Reference to the processing task
 last_processed_time = time.time()  # Track last processing time
+last_heartbeat_time = time.time()  # Track last heartbeat time
 processing_stats = {
     'messages_received': 0,
     'messages_processed': 0,
@@ -645,6 +649,10 @@ async def calculate_quantity_and_levels(entry_price: float, action: str, async_c
     """
     global virtual_balance
 
+    # Check if balance is too low to trade
+    if virtual_balance < MIN_BALANCE_THRESHOLD:
+        return 0.0, 0.0, 0.0, False
+
     risk_amount = virtual_balance * PNL_PERCENT
     
     # Calculate ATR for dynamic position sizing
@@ -698,7 +706,23 @@ async def execute_trade(async_client, action, entry_price, quantity, stop_loss, 
     Execute a real trade (async) or simulate it. Adds trade to open_trades.
     Implements trailing stop for trending markets.
     """
-    global virtual_balance, open_trades, trade_count
+    global virtual_balance, open_trades, trade_count, last_pattern_time
+    
+    # Check if quantity is 0 and skip if so
+    if quantity <= 0:
+        logger.info(f"Skipping trade with 0 quantity: {action.upper()} {SYMBOL} at ${entry_price:.2f}")
+        return
+    
+    # Check cooldown period for this pattern
+    current_time = time.time()
+    if pattern_name in last_pattern_time:
+        time_since_last = current_time - last_pattern_time[pattern_name]
+        if time_since_last < TRADE_COOLDOWN_SECONDS:
+            logger.debug(f"Skipping {pattern_name} due to cooldown ({time_since_last:.1f}s < {TRADE_COOLDOWN_SECONDS}s)")
+            return
+    
+    # Update last pattern time
+    last_pattern_time[pattern_name] = current_time
     
     # Determine if we should use trailing stop
     use_trailing_stop = market_regime.startswith("trending")
@@ -1214,7 +1238,7 @@ async def run_backtest(async_client):
 # ---------------------------
 async def process_message(message, async_client):
     """Process a single trade message with error handling."""
-    global processing_stats, candle_data
+    global processing_stats, candle_data, last_heartbeat_time
     processing_stats['messages_processed'] += 1
     start_time = time.time()
     
@@ -1222,6 +1246,9 @@ async def process_message(message, async_client):
         # Check if message is valid
         if not message or ('p' not in message and 'price' not in message):
             return
+        
+        # Update heartbeat time
+        last_heartbeat_time = time.time()
         
         # Aggregate into pseudo-candles
         candle_data = aggregate_candle(candle_data, message)
@@ -1306,11 +1333,48 @@ async def message_processor(async_client):
             logger.error(f"Error in message processor: {e}")
             await asyncio.sleep(0.1)
 
+async def check_websocket_connection(async_client):
+    """Check if WebSocket connection is alive and reconnect if necessary."""
+    global last_heartbeat_time
+    
+    while True:
+        try:
+            # Check if we haven't received a message in the last 30 seconds
+            if time.time() - last_heartbeat_time > 30:
+                logger.warning("No messages received for 30 seconds, WebSocket might be disconnected")
+                
+                # Try to get server time to check connection
+                try:
+                    server_time = await async_client.get_server_time()
+                    logger.info(f"Server time check successful: {server_time}")
+                    last_heartbeat_time = time.time()
+                except Exception as e:
+                    logger.error(f"Connection check failed: {e}")
+                    logger.info("Attempting to restart WebSocket connection...")
+                    
+                    # Cancel the current processing task
+                    if processing_task:
+                        processing_task.cancel()
+                        try:
+                            await processing_task
+                        except asyncio.CancelledError:
+                            pass
+                    
+                    # Restart the trade stream
+                    await process_trade_stream(async_client)
+            
+            # Sleep for 10 seconds before checking again
+            await asyncio.sleep(10)
+            
+        except Exception as e:
+            logger.error(f"Error in WebSocket connection check: {e}")
+            await asyncio.sleep(10)
+
 async def process_trade_stream(async_client):
     """
     Consume trade websocket, queue messages, and process them asynchronously.
     """
-    global processing_stats, processing_task
+    global processing_stats, processing_task, last_heartbeat_time
     
     # Run backtest if enabled
     if BACKTEST_MODE:
@@ -1319,6 +1383,9 @@ async def process_trade_stream(async_client):
     
     # Start the message processor task
     processing_task = asyncio.create_task(message_processor(async_client))
+    
+    # Start the WebSocket connection checker
+    connection_checker = asyncio.create_task(check_websocket_connection(async_client))
     
     bsm = BinanceSocketManager(async_client)
     ws_symbol = SYMBOL.lower()
@@ -1334,8 +1401,9 @@ async def process_trade_stream(async_client):
                 # Receive message with timeout to allow for queue processing
                 trade = await asyncio.wait_for(ts.recv(), timeout=5.0)
                 
-                # Update statistics
+                # Update statistics and heartbeat time
                 processing_stats['messages_received'] += 1
+                last_heartbeat_time = time.time()
                 
                 # Try to put message in queue, but don't block if queue is full
                 try:
@@ -1386,6 +1454,13 @@ async def process_trade_stream(async_client):
             await processing_task
         except asyncio.CancelledError:
             pass
+    
+    # Clean up the connection checker
+    connection_checker.cancel()
+    try:
+        await connection_checker
+    except asyncio.CancelledError:
+        pass
 
 # ---------------------------
 # Printing / UI helpers
