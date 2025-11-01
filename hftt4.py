@@ -114,6 +114,12 @@ trade_count = 0
 last_analysis_time = time.time()
 last_periodic_report_time = time.time()  # Track last periodic report time
 
+# WebSocket management
+ws_reconnect_attempts = 0
+MAX_RECONNECT_ATTEMPTS = 5
+ws_connected = False
+ws_manager = None
+
 # ---------------------------
 # Read credentials from api.txt
 # ---------------------------
@@ -1335,7 +1341,7 @@ async def message_processor(async_client):
 
 async def check_websocket_connection(async_client):
     """Check if WebSocket connection is alive and reconnect if necessary."""
-    global last_heartbeat_time
+    global last_heartbeat_time, ws_reconnect_attempts, ws_connected, ws_manager
     
     while True:
         try:
@@ -1350,18 +1356,38 @@ async def check_websocket_connection(async_client):
                     last_heartbeat_time = time.time()
                 except Exception as e:
                     logger.error(f"Connection check failed: {e}")
-                    logger.info("Attempting to restart WebSocket connection...")
                     
-                    # Cancel the current processing task
-                    if processing_task:
-                        processing_task.cancel()
-                        try:
-                            await processing_task
-                        except asyncio.CancelledError:
-                            pass
+                    # Increment reconnect attempts
+                    ws_reconnect_attempts += 1
                     
-                    # Restart the trade stream
-                    await process_trade_stream(async_client)
+                    if ws_reconnect_attempts <= MAX_RECONNECT_ATTEMPTS:
+                        logger.info(f"Attempting to restart WebSocket connection (attempt {ws_reconnect_attempts}/{MAX_RECONNECT_ATTEMPTS})...")
+                        
+                        # Cancel the current processing task
+                        if processing_task:
+                            processing_task.cancel()
+                            try:
+                                await processing_task
+                            except asyncio.CancelledError:
+                                pass
+                        
+                        # Close the existing socket manager if it exists
+                        if ws_manager:
+                            try:
+                                await ws_manager.close()
+                            except Exception:
+                                pass
+                        
+                        # Restart the trade stream
+                        await process_trade_stream(async_client)
+                    else:
+                        logger.error(f"Maximum WebSocket reconnection attempts ({MAX_RECONNECT_ATTEMPTS}) reached. Giving up.")
+                        ws_connected = False
+            
+            # If we've successfully reconnected, reset the counter
+            if time.time() - last_heartbeat_time < 30:
+                ws_reconnect_attempts = 0
+                ws_connected = True
             
             # Sleep for 10 seconds before checking again
             await asyncio.sleep(10)
@@ -1374,7 +1400,7 @@ async def process_trade_stream(async_client):
     """
     Consume trade websocket, queue messages, and process them asynchronously.
     """
-    global processing_stats, processing_task, last_heartbeat_time
+    global processing_stats, processing_task, last_heartbeat_time, ws_connected, ws_manager
     
     # Run backtest if enabled
     if BACKTEST_MODE:
@@ -1387,15 +1413,20 @@ async def process_trade_stream(async_client):
     # Start the WebSocket connection checker
     connection_checker = asyncio.create_task(check_websocket_connection(async_client))
     
-    bsm = BinanceSocketManager(async_client)
+    # Create a new BinanceSocketManager
+    ws_manager = BinanceSocketManager(async_client)
     ws_symbol = SYMBOL.lower()
     
-    # Create the trade socket without queue_size parameter
-    ts = bsm.trade_socket(ws_symbol)
+    # Create the trade socket
+    ts = ws_manager.trade_socket(ws_symbol)
     
     logger.info(f"Listening trade socket for {SYMBOL}...")
+    ws_connected = True
     
-    async with ts:
+    try:
+        # Start the socket
+        await ts.__aenter__()
+        
         while True:
             try:
                 # Receive message with timeout to allow for queue processing
@@ -1446,21 +1477,33 @@ async def process_trade_stream(async_client):
                 logger.error(f"WebSocket error: {e}")
                 # Sleep before retrying
                 await asyncio.sleep(SLEEP_INTERVAL)
-    
-    # Clean up the processing task when done
-    if processing_task:
-        processing_task.cancel()
+    finally:
+        # Clean up the socket
         try:
-            await processing_task
+            await ts.__aexit__(None, None, None)
+        except Exception:
+            pass
+        
+        # Clean up the socket manager
+        try:
+            await ws_manager.close()
+        except Exception:
+            pass
+        
+        # Clean up the processing task
+        if processing_task:
+            processing_task.cancel()
+            try:
+                await processing_task
+            except asyncio.CancelledError:
+                pass
+        
+        # Clean up the connection checker
+        connection_checker.cancel()
+        try:
+            await connection_checker
         except asyncio.CancelledError:
             pass
-    
-    # Clean up the connection checker
-    connection_checker.cancel()
-    try:
-        await connection_checker
-    except asyncio.CancelledError:
-        pass
 
 # ---------------------------
 # Printing / UI helpers
