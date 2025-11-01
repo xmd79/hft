@@ -75,6 +75,13 @@ ANALYSIS_FILE = 'trade_analysis.txt'
 ANALYSIS_INTERVAL = 3600  # Run analysis every hour (in seconds)
 PERIODIC_REPORT_INTERVAL = 300  # Run periodic report every 5 minutes (in seconds)
 
+# WebSocket configuration
+WS_QUEUE_SIZE = 2000               # Internal queue size for processing
+WS_RECONNECT_DELAY = 5            # Seconds to wait before reconnecting
+WS_MAX_RECONNECT_ATTEMPTS = 10    # Maximum reconnection attempts
+WS_PROCESSING_TIMEOUT = 0.001      # Timeout for message processing (seconds)
+WS_HEARTBEAT_INTERVAL = 30        # Seconds between heartbeat checks
+
 # ---------------------------
 # Global runtime state
 # ---------------------------
@@ -98,7 +105,7 @@ plus_di_values = deque(maxlen=ADX_PERIOD)
 minus_di_values = deque(maxlen=ADX_PERIOD)
 
 # Message processing optimization
-message_queue = asyncio.Queue(maxsize=1000)  # Queue for processing messages
+message_queue = asyncio.Queue(maxsize=WS_QUEUE_SIZE)  # Queue for processing messages
 processing_task = None  # Reference to the processing task
 last_processed_time = time.time()  # Track last processing time
 last_heartbeat_time = time.time()  # Track last heartbeat time
@@ -116,9 +123,10 @@ last_periodic_report_time = time.time()  # Track last periodic report time
 
 # WebSocket management
 ws_reconnect_attempts = 0
-MAX_RECONNECT_ATTEMPTS = 5
 ws_connected = False
 ws_manager = None
+ws_socket = None
+ws_active = False
 
 # ---------------------------
 # Read credentials from api.txt
@@ -1330,7 +1338,7 @@ async def message_processor(async_client):
             last_processed_time = time.time()
             
             # Small delay to prevent CPU overload
-            await asyncio.sleep(0.001)
+            await asyncio.sleep(WS_PROCESSING_TIMEOUT)
             
         except asyncio.TimeoutError:
             # No messages in queue, continue loop
@@ -1339,68 +1347,142 @@ async def message_processor(async_client):
             logger.error(f"Error in message processor: {e}")
             await asyncio.sleep(0.1)
 
-async def check_websocket_connection(async_client):
-    """Check if WebSocket connection is alive and reconnect if necessary."""
-    global last_heartbeat_time, ws_reconnect_attempts, ws_connected, ws_manager
+async def websocket_listener(async_client):
+    """Listen to WebSocket messages and handle connection issues."""
+    global ws_connected, ws_manager, ws_socket, ws_active, ws_reconnect_attempts, last_heartbeat_time
     
-    while True:
+    ws_symbol = SYMBOL.lower()
+    
+    while ws_reconnect_attempts < WS_MAX_RECONNECT_ATTEMPTS:
         try:
-            # Check if we haven't received a message in the last 30 seconds
-            if time.time() - last_heartbeat_time > 30:
-                logger.warning("No messages received for 30 seconds, WebSocket might be disconnected")
-                
-                # Try to get server time to check connection
+            # Create a new BinanceSocketManager
+            ws_manager = BinanceSocketManager(async_client)
+            
+            # Create the trade socket
+            ws_socket = ws_manager.trade_socket(ws_symbol)
+            
+            logger.info(f"Connecting to WebSocket for {SYMBOL} (attempt {ws_reconnect_attempts + 1}/{WS_MAX_RECONNECT_ATTEMPTS})...")
+            
+            # Connect to the WebSocket
+            await ws_socket.__aenter__()
+            ws_connected = True
+            ws_active = True
+            ws_reconnect_attempts = 0  # Reset counter on successful connection
+            
+            logger.info(f"WebSocket connection established for {SYMBOL}")
+            
+            # Listen for messages
+            while ws_active:
                 try:
-                    server_time = await async_client.get_server_time()
-                    logger.info(f"Server time check successful: {server_time}")
+                    # Receive message with timeout
+                    trade = await asyncio.wait_for(ws_socket.recv(), timeout=5.0)
+                    
+                    # Update statistics and heartbeat time
+                    processing_stats['messages_received'] += 1
                     last_heartbeat_time = time.time()
+                    
+                    # Try to put message in queue
+                    try:
+                        # Check if queue is getting full
+                        queue_size = message_queue.qsize()
+                        if queue_size > WS_QUEUE_SIZE * 0.8:
+                            # Queue is getting full, log warning
+                            logger.warning(f"Message queue is {queue_size}/{WS_QUEUE_SIZE} ({queue_size/WS_QUEUE_SIZE*100:.1f}%) full")
+                            
+                            # If queue is almost full, drop the message to prevent overflow
+                            if queue_size > WS_QUEUE_SIZE * 0.95:
+                                processing_stats['overflows'] += 1
+                                logger.warning(f"Message queue nearly full, dropping message. Overflows: {processing_stats['overflows']}")
+                                continue
+                        
+                        message_queue.put_nowait(trade)
+                    except asyncio.QueueFull:
+                        # Queue is full, log warning and drop message
+                        processing_stats['overflows'] += 1
+                        logger.warning(f"Message queue full, dropping message. Overflows: {processing_stats['overflows']}")
+                    
+                    # Periodically log processing statistics
+                    if processing_stats['messages_received'] % 1000 == 0:
+                        queue_size = message_queue.qsize()
+                        logger.info(f"Processing statistics: Received={processing_stats['messages_received']}, "
+                                  f"Processed={processing_stats['messages_processed']}, "
+                                  f"Overflows={processing_stats['overflows']}, "
+                                  f"QueueSize={queue_size}, "
+                                  f"AvgProcessTime={processing_stats['processing_time'] / max(1, processing_stats['messages_processed']):.4f}s")
+                
+                except asyncio.TimeoutError:
+                    # No message received within timeout, check if we need to reconnect
+                    if time.time() - last_heartbeat_time > WS_HEARTBEAT_INTERVAL:
+                        logger.warning(f"No messages received for {WS_HEARTBEAT_INTERVAL} seconds, reconnecting...")
+                        break
+                    continue
+                
+                except BinanceWebsocketQueueOverflow as e:
+                    # Handle the specific overflow exception
+                    processing_stats['overflows'] += 1
+                    logger.error(f"Binance WebSocket queue overflow: {e}. Overflows: {processing_stats['overflows']}")
+                    
+                    # Sleep briefly to allow the queue to drain
+                    await asyncio.sleep(0.1)
+                    
+                    # If we get too many overflows, reconnect
+                    if processing_stats['overflows'] % 10 == 0:
+                        logger.warning("Multiple WebSocket overflows detected, reconnecting...")
+                        break
+                
                 except Exception as e:
-                    logger.error(f"Connection check failed: {e}")
-                    
-                    # Increment reconnect attempts
-                    ws_reconnect_attempts += 1
-                    
-                    if ws_reconnect_attempts <= MAX_RECONNECT_ATTEMPTS:
-                        logger.info(f"Attempting to restart WebSocket connection (attempt {ws_reconnect_attempts}/{MAX_RECONNECT_ATTEMPTS})...")
-                        
-                        # Cancel the current processing task
-                        if processing_task:
-                            processing_task.cancel()
-                            try:
-                                await processing_task
-                            except asyncio.CancelledError:
-                                pass
-                        
-                        # Close the existing socket manager if it exists
-                        if ws_manager:
-                            try:
-                                await ws_manager.close()
-                            except Exception:
-                                pass
-                        
-                        # Restart the trade stream
-                        await process_trade_stream(async_client)
-                    else:
-                        logger.error(f"Maximum WebSocket reconnection attempts ({MAX_RECONNECT_ATTEMPTS}) reached. Giving up.")
-                        ws_connected = False
+                    logger.error(f"WebSocket error: {e}")
+                    break
             
-            # If we've successfully reconnected, reset the counter
-            if time.time() - last_heartbeat_time < 30:
-                ws_reconnect_attempts = 0
-                ws_connected = True
+            # Clean up the socket
+            try:
+                await ws_socket.__aexit__(None, None, None)
+            except Exception:
+                pass
             
-            # Sleep for 10 seconds before checking again
-            await asyncio.sleep(10)
+            # Clean up the socket manager
+            try:
+                await ws_manager.close()
+            except Exception:
+                pass
             
+            ws_connected = False
+            
+            # Wait before reconnecting
+            if ws_active and ws_reconnect_attempts < WS_MAX_RECONNECT_ATTEMPTS:
+                logger.info(f"Waiting {WS_RECONNECT_DELAY} seconds before reconnecting...")
+                await asyncio.sleep(WS_RECONNECT_DELAY)
+        
         except Exception as e:
-            logger.error(f"Error in WebSocket connection check: {e}")
-            await asyncio.sleep(10)
+            logger.error(f"Error creating WebSocket connection: {e}")
+            ws_connected = False
+            
+            # Clean up the socket manager if it exists
+            if ws_manager:
+                try:
+                    await ws_manager.close()
+                except Exception:
+                    pass
+            
+            # Wait before reconnecting
+            if ws_reconnect_attempts < WS_MAX_RECONNECT_ATTEMPTS:
+                logger.info(f"Waiting {WS_RECONNECT_DELAY} seconds before reconnecting...")
+                await asyncio.sleep(WS_RECONNECT_DELAY)
+        
+        finally:
+            ws_reconnect_attempts += 1
+    
+    # If we've exhausted all reconnection attempts
+    if ws_reconnect_attempts >= WS_MAX_RECONNECT_ATTEMPTS:
+        logger.error(f"Maximum WebSocket reconnection attempts ({WS_MAX_RECONNECT_ATTEMPTS}) reached. Giving up.")
+        ws_connected = False
+        ws_active = False
 
 async def process_trade_stream(async_client):
     """
     Consume trade websocket, queue messages, and process them asynchronously.
     """
-    global processing_stats, processing_task, last_heartbeat_time, ws_connected, ws_manager
+    global processing_task, ws_active
     
     # Run backtest if enabled
     if BACKTEST_MODE:
@@ -1410,100 +1492,41 @@ async def process_trade_stream(async_client):
     # Start the message processor task
     processing_task = asyncio.create_task(message_processor(async_client))
     
-    # Start the WebSocket connection checker
-    connection_checker = asyncio.create_task(check_websocket_connection(async_client))
-    
-    # Create a new BinanceSocketManager
-    ws_manager = BinanceSocketManager(async_client)
-    ws_symbol = SYMBOL.lower()
-    
-    # Create the trade socket
-    ts = ws_manager.trade_socket(ws_symbol)
-    
-    logger.info(f"Listening trade socket for {SYMBOL}...")
-    ws_connected = True
+    # Start the WebSocket listener
+    ws_active = True
+    websocket_task = asyncio.create_task(websocket_listener(async_client))
     
     try:
-        # Start the socket
-        await ts.__aenter__()
+        # Wait for either task to complete
+        done, pending = await asyncio.wait(
+            [processing_task, websocket_task],
+            return_when=asyncio.FIRST_COMPLETED
+        )
         
-        while True:
+        # Cancel pending tasks
+        for task in pending:
+            task.cancel()
             try:
-                # Receive message with timeout to allow for queue processing
-                trade = await asyncio.wait_for(ts.recv(), timeout=5.0)
-                
-                # Update statistics and heartbeat time
-                processing_stats['messages_received'] += 1
-                last_heartbeat_time = time.time()
-                
-                # Try to put message in queue, but don't block if queue is full
-                try:
-                    message_queue.put_nowait(trade)
-                except asyncio.QueueFull:
-                    # Queue is full, log warning and drop message
-                    processing_stats['overflows'] += 1
-                    logger.warning(f"Message queue full, dropping message. Overflows: {processing_stats['overflows']}")
-                    
-                    # If we have too many overflows, log more details
-                    if processing_stats['overflows'] % 100 == 0:
-                        queue_size = message_queue.qsize()
-                        logger.warning(f"Queue statistics: Received={processing_stats['messages_received']}, "
-                                     f"Processed={processing_stats['messages_processed']}, "
-                                     f"Overflows={processing_stats['overflows']}, "
-                                     f"QueueSize={queue_size}, "
-                                     f"AvgProcessTime={processing_stats['processing_time'] / max(1, processing_stats['messages_processed']):.4f}s")
-                
-                # Periodically log processing statistics
-                if processing_stats['messages_received'] % 1000 == 0:
-                    queue_size = message_queue.qsize()
-                    logger.info(f"Processing statistics: Received={processing_stats['messages_received']}, "
-                              f"Processed={processing_stats['messages_processed']}, "
-                              f"Overflows={processing_stats['overflows']}, "
-                              f"QueueSize={queue_size}, "
-                              f"AvgProcessTime={processing_stats['processing_time'] / max(1, processing_stats['messages_processed']):.4f}s")
-                
-            except asyncio.TimeoutError:
-                # No message received within timeout, continue loop
-                continue
-            except BinanceWebsocketQueueOverflow as e:
-                # Handle the specific overflow exception
-                processing_stats['overflows'] += 1
-                logger.error(f"Binance WebSocket queue overflow: {e}. Overflows: {processing_stats['overflows']}")
-                
-                # Sleep briefly to allow the queue to drain
-                await asyncio.sleep(0.1)
-                
-            except Exception as e:
-                logger.error(f"WebSocket error: {e}")
-                # Sleep before retrying
-                await asyncio.sleep(SLEEP_INTERVAL)
+                await task
+            except asyncio.CancelledError:
+                pass
+    except Exception as e:
+        logger.error(f"Error in trade stream processing: {e}")
     finally:
-        # Clean up the socket
-        try:
-            await ts.__aexit__(None, None, None)
-        except Exception:
-            pass
-        
-        # Clean up the socket manager
-        try:
-            await ws_manager.close()
-        except Exception:
-            pass
-        
-        # Clean up the processing task
-        if processing_task:
+        # Clean up tasks
+        if processing_task and not processing_task.done():
             processing_task.cancel()
             try:
                 await processing_task
             except asyncio.CancelledError:
                 pass
         
-        # Clean up the connection checker
-        connection_checker.cancel()
-        try:
-            await connection_checker
-        except asyncio.CancelledError:
-            pass
+        if websocket_task and not websocket_task.done():
+            websocket_task.cancel()
+            try:
+                await websocket_task
+            except asyncio.CancelledError:
+                pass
 
 # ---------------------------
 # Printing / UI helpers
