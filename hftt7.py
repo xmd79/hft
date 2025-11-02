@@ -1267,12 +1267,6 @@ def analyze_trades():
         print(f"Max Drawdown: ${analysis['max_drawdown']:.4f}")
         print(f"Final Balance: ${analysis['final_balance']:.4f}")
         
-        # Add explanation for profitability despite lower win rate
-        print("\nNote: The bot is profitable despite a lower win rate because:")
-        print(f"- Profit Factor ({analysis['profit_factor']:.2f}) shows profits are {analysis['profit_factor']:.2f}x larger than losses")
-        print(f"- Max Win (${analysis['max_win']:.4f}) is {abs(analysis['max_win']/analysis['max_loss']):.2f}x larger than Max Loss (${analysis['max_loss']:.4f})")
-        print("- This indicates a favorable risk-reward ratio where winning trades generate more profit than losing trades lose")
-        
         print("="*50 + "\n")
         
         # Update last analysis time
@@ -1371,12 +1365,6 @@ def print_periodic_report():
         print(f"Max Loss: ${max_loss:.4f}")
         print(f"Profit Factor: {profit_factor:.2f}")
         
-        # Add explanation for profitability despite lower win rate
-        print("\nNote: The bot is profitable despite a lower win rate because:")
-        print(f"- Profit Factor ({profit_factor:.2f}) shows profits are {profit_factor:.2f}x larger than losses")
-        print(f"- Max Win (${max_win:.4f}) is {abs(max_win/max_loss):.2f}x larger than Max Loss (${max_loss:.4f})")
-        print("- This indicates a favorable risk-reward ratio where winning trades generate more profit than losing trades lose")
-        
         # Print cumulative report from start of bot
         print("\n" + "-"*50)
         print("CUMULATIVE REPORT FROM START OF BOT")
@@ -1412,12 +1400,6 @@ def print_periodic_report():
         print(f"Max Win: ${all_max_win:.4f}")
         print(f"Max Loss: ${all_max_loss:.4f}")
         print(f"Profit Factor: {all_profit_factor:.2f}")
-        
-        # Add explanation for cumulative profitability
-        print("\nNote: The bot is profitable overall despite a lower win rate because:")
-        print(f"- Profit Factor ({all_profit_factor:.2f}) shows profits are {all_profit_factor:.2f}x larger than losses")
-        print(f"- Max Win (${all_max_win:.4f}) is {abs(all_max_win/all_max_loss):.2f}x larger than Max Loss (${all_max_loss:.4f})")
-        print("- This indicates a favorable risk-reward ratio where winning trades generate more profit than losing trades lose")
         
         print("="*50 + "\n")
         
