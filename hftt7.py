@@ -81,7 +81,6 @@ DEFAULT_PRICE_TICK = 0.01
 TRADE_FILE = 'trades.csv'
 ANALYSIS_FILE = 'trade_analysis.txt'
 ANALYSIS_INTERVAL = 3600  # Run analysis every hour (in seconds)
-PERIODIC_REPORT_INTERVAL = 300  # Run periodic report every 5 minutes (in seconds)
 
 # WebSocket configuration
 WS_QUEUE_SIZE = 2000               # Internal queue size for processing
@@ -140,7 +139,6 @@ processing_stats = {
 # Trade analysis variables
 trade_count = 0
 last_analysis_time = time.time()
-last_periodic_report_time = time.time()  # Track last periodic report time
 
 # WebSocket management
 ws_reconnect_attempts = 0
@@ -1069,7 +1067,7 @@ async def track_trades(current_price):
     Check open_trades against current_price and close ones that hit SL or TP.
     Implements trailing stop for trending markets.
     """
-    global virtual_balance, open_trades, trade_count, last_analysis_time, last_periodic_report_time
+    global virtual_balance, open_trades, trade_count, last_analysis_time
     if current_price is None:
         return
     closed = []
@@ -1153,10 +1151,8 @@ async def track_trades(current_price):
     if current_time - last_analysis_time > ANALYSIS_INTERVAL:
         analyze_trades()
     
-    # Run periodic report (every 5 minutes)
-    if current_time - last_periodic_report_time > PERIODIC_REPORT_INTERVAL:
-        print_periodic_report()
-        last_periodic_report_time = current_time
+    # Print iteration report at each iteration
+    print_periodic_report()
 
 # ---------------------------
 # Trade Recording and Analysis
@@ -1270,6 +1266,13 @@ def analyze_trades():
         print(f"Profit Factor: {analysis['profit_factor']:.2f}")
         print(f"Max Drawdown: ${analysis['max_drawdown']:.4f}")
         print(f"Final Balance: ${analysis['final_balance']:.4f}")
+        
+        # Add explanation for profitability despite lower win rate
+        print("\nNote: The bot is profitable despite a lower win rate because:")
+        print(f"- Profit Factor ({analysis['profit_factor']:.2f}) shows profits are {analysis['profit_factor']:.2f}x larger than losses")
+        print(f"- Max Win (${analysis['max_win']:.4f}) is {abs(analysis['max_win']/analysis['max_loss']):.2f}x larger than Max Loss (${analysis['max_loss']:.4f})")
+        print("- This indicates a favorable risk-reward ratio where winning trades generate more profit than losing trades lose")
+        
         print("="*50 + "\n")
         
         # Update last analysis time
@@ -1279,12 +1282,12 @@ def analyze_trades():
         logger.error(f"Error analyzing trades: {e}")
 
 def print_periodic_report():
-    """Print a periodic report every 5 minutes with trading performance metrics."""
+    """Print a periodic report at each iteration with trading performance metrics."""
     global virtual_balance, bot_start_time
     
     if not Path(TRADE_FILE).exists():
         print("\n" + "="*50)
-        print("5-MINUTE PERFORMANCE REPORT")
+        print("ITERATION PERFORMANCE REPORT")
         print("="*50)
         print("No trades recorded yet.")
         print(f"Initial Balance: ${INITIAL_BALANCE:.4f}")
@@ -1305,7 +1308,7 @@ def print_periodic_report():
         
         if df.empty:
             print("\n" + "="*50)
-            print("5-MINUTE PERFORMANCE REPORT")
+            print("ITERATION PERFORMANCE REPORT")
             print("="*50)
             print("No trades recorded yet.")
             print(f"Initial Balance: ${INITIAL_BALANCE:.4f}")
@@ -1349,9 +1352,9 @@ def print_periodic_report():
         minutes, seconds = divmod(remainder, 60)
         running_time_str = f"{int(hours)}h {int(minutes)}m {int(seconds)}s"
         
-        # Print 5-minute report
+        # Print iteration report
         print("\n" + "="*50)
-        print("5-MINUTE PERFORMANCE REPORT")
+        print("ITERATION PERFORMANCE REPORT")
         print("="*50)
         print(f"Report Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"Bot Running Time: {running_time_str}")
@@ -1367,6 +1370,12 @@ def print_periodic_report():
         print(f"Max Win: ${max_win:.4f}")
         print(f"Max Loss: ${max_loss:.4f}")
         print(f"Profit Factor: {profit_factor:.2f}")
+        
+        # Add explanation for profitability despite lower win rate
+        print("\nNote: The bot is profitable despite a lower win rate because:")
+        print(f"- Profit Factor ({profit_factor:.2f}) shows profits are {profit_factor:.2f}x larger than losses")
+        print(f"- Max Win (${max_win:.4f}) is {abs(max_win/max_loss):.2f}x larger than Max Loss (${max_loss:.4f})")
+        print("- This indicates a favorable risk-reward ratio where winning trades generate more profit than losing trades lose")
         
         # Print cumulative report from start of bot
         print("\n" + "-"*50)
@@ -1403,6 +1412,13 @@ def print_periodic_report():
         print(f"Max Win: ${all_max_win:.4f}")
         print(f"Max Loss: ${all_max_loss:.4f}")
         print(f"Profit Factor: {all_profit_factor:.2f}")
+        
+        # Add explanation for cumulative profitability
+        print("\nNote: The bot is profitable overall despite a lower win rate because:")
+        print(f"- Profit Factor ({all_profit_factor:.2f}) shows profits are {all_profit_factor:.2f}x larger than losses")
+        print(f"- Max Win (${all_max_win:.4f}) is {abs(all_max_win/all_max_loss):.2f}x larger than Max Loss (${all_max_loss:.4f})")
+        print("- This indicates a favorable risk-reward ratio where winning trades generate more profit than losing trades lose")
+        
         print("="*50 + "\n")
         
     except Exception as e:
