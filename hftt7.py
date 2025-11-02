@@ -1150,9 +1150,6 @@ async def track_trades(current_price):
     current_time = time.time()
     if current_time - last_analysis_time > ANALYSIS_INTERVAL:
         analyze_trades()
-    
-    # Print iteration report at each iteration
-    print_periodic_report()
 
 # ---------------------------
 # Trade Recording and Analysis
@@ -1256,101 +1253,6 @@ def analyze_trades():
         
     except Exception as e:
         logger.error(f"Error analyzing trades: {e}")
-
-def print_periodic_report():
-    """Print a periodic report at each iteration with trading performance metrics."""
-    global virtual_balance, bot_start_time
-    
-    if not Path(TRADE_FILE).exists():
-        print("\n" + "="*50)
-        print("ITERATION PERFORMANCE REPORT")
-        print("="*50)
-        print("No trades recorded yet.")
-        print(f"Initial Balance: ${INITIAL_BALANCE:.4f}")
-        print(f"Current Balance: ${virtual_balance:.4f}")
-        print(f"Net PnL: ${virtual_balance - INITIAL_BALANCE:.4f}")
-        
-        # Calculate running time
-        running_time = time.time() - bot_start_time
-        hours, remainder = divmod(running_time, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        running_time_str = f"{int(hours)}h {int(minutes)}m {int(seconds)}s"
-        print(f"Bot Running Time: {running_time_str}")
-        print("="*50 + "\n")
-        return
-    
-    try:
-        df = pd.read_csv(TRADE_FILE)
-        
-        if df.empty:
-            print("\n" + "="*50)
-            print("ITERATION PERFORMANCE REPORT")
-            print("="*50)
-            print("No trades recorded yet.")
-            print(f"Initial Balance: ${INITIAL_BALANCE:.4f}")
-            print(f"Current Balance: ${virtual_balance:.4f}")
-            print(f"Net PnL: ${virtual_balance - INITIAL_BALANCE:.4f}")
-            
-            # Calculate running time
-            running_time = time.time() - bot_start_time
-            hours, remainder = divmod(running_time, 3600)
-            minutes, seconds = divmod(remainder, 60)
-            running_time_str = f"{int(hours)}h {int(minutes)}m {int(seconds)}s"
-            print(f"Bot Running Time: {running_time_str}")
-            print("="*50 + "\n")
-            return
-        
-        # Get closed trades (with exit price)
-        closed_trades = df[df['exit_price'] != 0]
-        
-        # Calculate metrics
-        total_closed_trades = len(closed_trades)
-        winning_trades = closed_trades[closed_trades['pnl'] > 0]
-        losing_trades = closed_trades[closed_trades['pnl'] < 0]
-        
-        win_rate = len(winning_trades) / total_closed_trades * 100 if total_closed_trades > 0 else 0
-        total_pnl = closed_trades['pnl'].sum()
-        avg_pnl = closed_trades['pnl'].mean() if total_closed_trades > 0 else 0
-        max_win = closed_trades['pnl'].max() if not winning_trades.empty else 0
-        max_loss = closed_trades['pnl'].min() if not losing_trades.empty else 0
-        
-        # Calculate profit factor
-        gross_profit = winning_trades['pnl'].sum() if not winning_trades.empty else 0
-        gross_loss = abs(losing_trades['pnl'].sum()) if not losing_trades.empty else 0
-        profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
-        
-        # Get open trades count
-        open_trades_count = len(open_trades)
-        
-        # Calculate running time
-        running_time = time.time() - bot_start_time
-        hours, remainder = divmod(running_time, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        running_time_str = f"{int(hours)}h {int(minutes)}m {int(seconds)}s"
-        
-        # Print iteration report
-        print("\n" + "="*50)
-        print("ITERATION PERFORMANCE REPORT")
-        print("="*50)
-        print(f"Report Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"Bot Running Time: {running_time_str}")
-        print(f"Initial Balance: ${INITIAL_BALANCE:.4f}")
-        print(f"Current Balance: ${virtual_balance:.4f}")
-        print(f"Net PnL: ${virtual_balance - INITIAL_BALANCE:.4f}")
-        print(f"Total Closed Trades: {total_closed_trades}")
-        print(f"Open Trades: {open_trades_count}")
-        print(f"Winning Trades: {len(winning_trades)} ({win_rate:.2f}%)")
-        print(f"Losing Trades: {len(losing_trades)} ({100 - win_rate:.2f}%)")
-        print(f"Total PnL from Closed Trades: ${total_pnl:.4f}")
-        print(f"Average PnL per Trade: ${avg_pnl:.4f}")
-        print(f"Max Win: ${max_win:.4f}")
-        print(f"Max Loss: ${max_loss:.4f}")
-        print(f"Profit Factor: {profit_factor:.2f}")
-        
-        print("="*50 + "\n")
-        
-    except Exception as e:
-        logger.error(f"Error printing periodic report: {e}")
 
 # ---------------------------
 # Backtesting Functionality
