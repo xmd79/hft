@@ -1251,24 +1251,6 @@ def analyze_trades():
                 f"{analysis['profit_factor']:.2f},{analysis['max_drawdown']:.4f},{analysis['final_balance']:.4f}\n"
             )
         
-        # Print to console
-        print("\n" + "="*50)
-        print("TRADE ANALYSIS REPORT")
-        print("="*50)
-        print(f"Analysis Time: {analysis['timestamp']}")
-        print(f"Total Trades: {analysis['total_trades']}")
-        print(f"Winning Trades: {analysis['winning_trades']} ({analysis['win_rate']:.2f}%)")
-        print(f"Losing Trades: {analysis['losing_trades']} ({100 - analysis['win_rate']:.2f}%)")
-        print(f"Total PnL: ${analysis['total_pnl']:.4f}")
-        print(f"Average PnL: ${analysis['avg_pnl']:.4f}")
-        print(f"Max Win: ${analysis['max_win']:.4f}")
-        print(f"Max Loss: ${analysis['max_loss']:.4f}")
-        print(f"Profit Factor: {analysis['profit_factor']:.2f}")
-        print(f"Max Drawdown: ${analysis['max_drawdown']:.4f}")
-        print(f"Final Balance: ${analysis['final_balance']:.4f}")
-        
-        print("="*50 + "\n")
-        
         # Update last analysis time
         last_analysis_time = time.time()
         
@@ -1364,42 +1346,6 @@ def print_periodic_report():
         print(f"Max Win: ${max_win:.4f}")
         print(f"Max Loss: ${max_loss:.4f}")
         print(f"Profit Factor: {profit_factor:.2f}")
-        
-        # Print cumulative report from start of bot
-        print("\n" + "-"*50)
-        print("CUMULATIVE REPORT FROM START OF BOT")
-        print("-"*50)
-        
-        # Calculate cumulative metrics (all trades since bot started)
-        all_trades = df  # All trades including open ones
-        all_closed_trades = df[df['exit_price'] != 0]  # Only closed trades
-        
-        all_total_trades = len(all_trades)
-        all_closed_trades_count = len(all_closed_trades)
-        all_winning_trades = all_closed_trades[all_closed_trades['pnl'] > 0]
-        all_losing_trades = all_closed_trades[all_closed_trades['pnl'] < 0]
-        
-        all_win_rate = len(all_winning_trades) / all_closed_trades_count * 100 if all_closed_trades_count > 0 else 0
-        all_total_pnl = all_closed_trades['pnl'].sum()
-        all_avg_pnl = all_closed_trades['pnl'].mean() if all_closed_trades_count > 0 else 0
-        all_max_win = all_closed_trades['pnl'].max() if not all_winning_trades.empty else 0
-        all_max_loss = all_closed_trades['pnl'].min() if not all_losing_trades.empty else 0
-        
-        # Calculate profit factor
-        all_gross_profit = all_winning_trades['pnl'].sum() if not all_winning_trades.empty else 0
-        all_gross_loss = abs(all_losing_trades['pnl'].sum()) if not all_losing_trades.empty else 0
-        all_profit_factor = all_gross_profit / all_gross_loss if all_gross_loss > 0 else float('inf')
-        
-        print(f"Total Trades (All): {all_total_trades}")
-        print(f"Closed Trades: {all_closed_trades_count}")
-        print(f"Open Trades: {len(open_trades)}")
-        print(f"Winning Trades: {len(all_winning_trades)} ({all_win_rate:.2f}%)")
-        print(f"Losing Trades: {len(all_losing_trades)} ({100 - all_win_rate:.2f}%)")
-        print(f"Total PnL from Closed Trades: ${all_total_pnl:.4f}")
-        print(f"Average PnL per Trade: ${all_avg_pnl:.4f}")
-        print(f"Max Win: ${all_max_win:.4f}")
-        print(f"Max Loss: ${all_max_loss:.4f}")
-        print(f"Profit Factor: {all_profit_factor:.2f}")
         
         print("="*50 + "\n")
         
