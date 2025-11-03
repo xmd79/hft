@@ -1558,10 +1558,10 @@ async def calculate_quantity_and_levels(entry_price: float, action: str, async_c
         # Recalculate costs with the new quantity
         margin_required = (quantity * entry_price) / current_leverage if entry_price > 0 else float('inf')
         opening_fee = quantity * entry_price * FEE_RATE
-        total_cost = margin_required + opening_fee
+        new_total_cost = margin_required + opening_fee
         # Check if we can afford this
-        if total_cost > balance:
-            logger.info(f"Adjusted quantity to meet notional requirement, but now exceeds balance. Notional: ${notional_value:.4f}, Min Notional: ${min_notional}, New Quantity: {quantity}, Total Cost: ${total_cost:.4f}, Balance: ${balance:.4f}")
+        if new_total_cost > balance:
+            logger.info(f"Adjusted quantity to meet notional requirement, but now exceeds balance. Notional: ${notional_value:.4f}, Min Notional: ${min_notional}, New Quantity: {quantity}, Total Cost: ${new_total_cost:.4f}, Balance: ${balance:.4f}")
             return 0.0, 0.0, 0.0, False
     
     # Calculate margin required for this trade
@@ -1748,7 +1748,7 @@ async def execute_trade(async_client, action, entry_price, quantity, stop_loss, 
     opening_fee = quantity * entry_price * FEE_RATE
     
     # Total cost to open the position
-    total_cost = margin_required + opening_fee
+    total_cost = opening_fee  # Only deduct the opening fee, not the margin
     
     trade_info = {
         'action': action,
@@ -1801,7 +1801,7 @@ async def execute_trade(async_client, action, entry_price, quantity, stop_loss, 
                     # Recalculate costs with new quantity
                     margin_required = (rounded_quantity * entry_price) / current_leverage if entry_price > 0 else 0.0
                     opening_fee = rounded_quantity * entry_price * FEE_RATE
-                    new_total_cost = margin_required + opening_fee
+                    new_total_cost = opening_fee  # Only the opening fee
                     
                     # Check if we can afford this
                     balance = real_balance if real_balance > 0 else virtual_balance
@@ -1825,8 +1825,8 @@ async def execute_trade(async_client, action, entry_price, quantity, stop_loss, 
                 )
                 
                 # Only deduct balance after order is successfully placed
-                real_balance -= total_cost
-                logger.info(f"Order placed successfully. Deducted ${total_cost:.4f} from balance. Remaining balance: ${real_balance:.4f}")
+                real_balance -= total_cost  # Only deduct the opening fee
+                logger.info(f"Order placed successfully. Deducted ${total_cost:.4f} (opening fee) from balance. Remaining balance: ${real_balance:.4f}")
                 
                 # For trailing stop, we'll monitor and update manually
                 if not use_trailing_stop:
@@ -1895,7 +1895,7 @@ async def execute_trade(async_client, action, entry_price, quantity, stop_loss, 
                     # Recalculate margin and fees
                     margin_required = (new_quantity * entry_price) / current_leverage if entry_price > 0 else 0.0
                     opening_fee = new_quantity * entry_price * FEE_RATE
-                    new_total_cost = margin_required + opening_fee
+                    new_total_cost = opening_fee  # Only the opening fee
                     
                     logger.info(f"Retrying with recalculated quantity: {new_quantity}, new total cost: {new_total_cost}")
                     quantity = new_quantity
@@ -1916,7 +1916,7 @@ async def execute_trade(async_client, action, entry_price, quantity, stop_loss, 
                     # Recalculate margin and fees
                     margin_required = (new_quantity * entry_price) / current_leverage if entry_price > 0 else 0.0
                     opening_fee = new_quantity * entry_price * FEE_RATE
-                    new_total_cost = margin_required + opening_fee
+                    new_total_cost = opening_fee  # Only the opening fee
                     
                     logger.info(f"Retrying with rounded quantity: {new_quantity}, new total cost: {new_total_cost}")
                     quantity = new_quantity
@@ -1935,7 +1935,7 @@ async def execute_trade(async_client, action, entry_price, quantity, stop_loss, 
         reason = "not authorized" if not AUTH else "insufficient margin or size"
         logger.info(f"Simulating trade due to {reason}: {action.upper()} {quantity} {SYMBOL} at ${entry_price:.2f}, SL: ${stop_loss:.2f}, TP: ${take_profit:.2f} | fee: ${opening_fee:.4f} | Virtual Balance: ${virtual_balance:.4f}")
         
-        # For simulated trades, deduct from virtual balance
+        # For simulated trades, deduct only the opening fee from virtual balance
         virtual_balance -= total_cost
 
     open_trades.append(trade_info)
@@ -2024,51 +2024,49 @@ async def track_trades(current_price):
                 gross_pnl = (stop_loss - entry_price) * quantity * PIP_VALUE
                 # Calculate closing fee
                 closing_fee = quantity * stop_loss * FEE_RATE
-                # Net PnL = gross PnL - opening_fee - closing_fee
-                pnl = gross_pnl - opening_fee - closing_fee
+                # Net PnL = gross PnL - closing fee (opening fee was already paid)
+                pnl = gross_pnl - closing_fee
                 closed.append(trade)
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] EXIT  -> BUY closed at ${exit_price:.2f} | PnL ${pnl:.4f} | Real Balance: ${real_balance:.4f} | Virtual Balance: ${virtual_balance:.4f}")
-                # Update balances
+                # Update balances - only add the net PnL (margin is released but not added to balance)
                 if AUTH and real_balance > 0 and not is_simulated:
-                    # Update real balance for real trades
-                    real_balance += margin_used + pnl
+                    real_balance += pnl
                 else:
-                    # Update virtual balance for simulated trades
-                    virtual_balance += margin_used + pnl
+                    virtual_balance += pnl
             elif current_price >= take_profit:
                 exit_price = take_profit
                 gross_pnl = (take_profit - entry_price) * quantity * PIP_VALUE
                 closing_fee = quantity * take_profit * FEE_RATE
-                pnl = gross_pnl - opening_fee - closing_fee
+                pnl = gross_pnl - closing_fee
                 closed.append(trade)
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] EXIT  -> BUY closed at ${exit_price:.2f} | PnL ${pnl:.4f} | Real Balance: ${real_balance:.4f} | Virtual Balance: ${virtual_balance:.4f}")
                 if AUTH and real_balance > 0 and not is_simulated:
-                    real_balance += margin_used + pnl
+                    real_balance += pnl
                 else:
-                    virtual_balance += margin_used + pnl
+                    virtual_balance += pnl
         else:  # sell
             if current_price >= stop_loss:
                 exit_price = stop_loss
                 gross_pnl = (entry_price - stop_loss) * quantity * PIP_VALUE
                 closing_fee = quantity * stop_loss * FEE_RATE
-                pnl = gross_pnl - opening_fee - closing_fee
+                pnl = gross_pnl - closing_fee
                 closed.append(trade)
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] EXIT  -> SELL closed at ${exit_price:.2f} | PnL ${pnl:.4f} | Real Balance: ${real_balance:.4f} | Virtual Balance: ${virtual_balance:.4f}")
                 if AUTH and real_balance > 0 and not is_simulated:
-                    real_balance += margin_used + pnl
+                    real_balance += pnl
                 else:
-                    virtual_balance += margin_used + pnl
+                    virtual_balance += pnl
             elif current_price <= take_profit:
                 exit_price = take_profit
                 gross_pnl = (entry_price - take_profit) * quantity * PIP_VALUE
                 closing_fee = quantity * take_profit * FEE_RATE
-                pnl = gross_pnl - opening_fee - closing_fee
+                pnl = gross_pnl - closing_fee
                 closed.append(trade)
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] EXIT  -> SELL closed at ${exit_price:.2f} | PnL ${pnl:.4f} | Real Balance: ${real_balance:.4f} | Virtual Balance: ${virtual_balance:.4f}")
                 if AUTH and real_balance > 0 and not is_simulated:
-                    real_balance += margin_used + pnl
+                    real_balance += pnl
                 else:
-                    virtual_balance += margin_used + pnl
+                    virtual_balance += pnl
         
         # Record closed trade
         if exit_price is not None:
