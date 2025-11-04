@@ -8,7 +8,6 @@ import json
 import csv
 import traceback
 import signal
-import shutil
 import statistics
 from datetime import datetime
 from decimal import Decimal, ROUND_DOWN
@@ -36,7 +35,7 @@ from aiohttp import web
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[logging.FileHandler('trading_bot.log'), logging.StreamHandler(sys.stdout)]
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
 
@@ -201,7 +200,6 @@ TRADE_COOLDOWN_SECONDS = 60        # Cooldown period between same pattern trades
 # Backtesting parameters
 BACKTEST_MODE = False              # Set to True to run in backtest mode
 BACKTEST_DAYS = 30                 # Number of days to backtest
-BACKTEST_FILE = 'backtest_results.json'  # File to store backtest results
 
 # Market regime parameters
 ADX_PERIOD = 14                    # Period for ADX calculation
@@ -224,11 +222,6 @@ LRC_DEVIATION_MULTIPLIER = 2.0     # Deviation multiplier for channel width
 DEFAULT_QUANTITY_STEP = 0.000001
 DEFAULT_PRICE_TICK = 0.01
 
-# Trade analysis parameters
-TRADE_FILE = 'trades.csv'
-ANALYSIS_FILE = 'trade_analysis.txt'
-ANALYSIS_INTERVAL = 3600  # Run analysis every hour (in seconds)
-
 # WebSocket configuration
 WS_QUEUE_SIZE = 2000               # Internal queue size for processing
 WS_RECONNECT_DELAY = 10            # Seconds to wait before reconnecting
@@ -238,7 +231,6 @@ WS_HEARTBEAT_INTERVAL = 30        # Seconds between heartbeat checks
 
 # Debugging options
 DEBUG_MODE = True                  # Enable detailed debug logging
-SAVE_DEBUG_DATA = True             # Save debug data to files
 
 # Hurst Exponent parameters
 HURST_WINDOW_SIZE = 200            # Window size for Hurst calculation
@@ -258,7 +250,6 @@ current_balance = INITIAL_BALANCE   # Track current balance (real or virtual)
 candle_data = []                   # List of pseudo-candle dicts
 symbol_info_cache = {}             # Cache symbol exchange_info
 AUTH = False                       # Whether API keys were provided
-backtest_results = []              # Store backtest results
 market_regime = "ranging"          # Current market regime (trending/ranging)
 volatility_state = "normal"        # Current volatility state (low/normal/high)
 last_pattern_time = {}             # Track last pattern execution time for cooldown
@@ -310,7 +301,6 @@ processing_stats = {
 
 # Trade analysis variables
 trade_count = 0
-last_analysis_time = time.time()
 
 # WebSocket management
 ws_reconnect_attempts = 0
@@ -321,13 +311,6 @@ ws_active = False
 
 # Balance updater task
 balance_updater_task = None
-
-# Debug data collection
-debug_data = {
-    'messages': [],
-    'errors': [],
-    'status_updates': []
-}
 
 # ---------------------------
 # Read credentials from api.txt
@@ -1407,8 +1390,6 @@ async def execute_trade(async_client, action, entry_price, quantity, stop_loss, 
     open_trades.append(trade_info)
     print(f"[{datetime.now().strftime('%H:%M:%S')}] ENTRY -> {action.upper():4} | Qty {quantity:.6f} | Price {entry_price:.2f} | SL {stop_loss:.2f} | TP {take_profit:.2f} | Simulated: {trade_info['is_simulated']} | Pattern: {pattern_name} | Balance: ${current_balance:.4f}")
     
-    # Write trade entry to file
-    write_trade_result(trade_info)
     trade_count += 1
 
 def send_webhook(action, entry_price, stop_loss, take_profit, quantity, is_simulated):
@@ -1446,7 +1427,7 @@ async def track_trades(current_price):
     Check open_trades against current_price and close ones that hit SL or TP.
     Implements trailing stop for trending markets.
     """
-    global current_balance, open_trades, trade_count, last_analysis_time
+    global current_balance, open_trades, trade_count
     if current_price is None:
         return
     closed = []
@@ -1525,185 +1506,22 @@ async def track_trades(current_price):
             trade['exit_price'] = exit_price
             trade['pnl'] = pnl
             trade['exit_time'] = datetime.now().isoformat()  # Add exit time
-            write_trade_result(trade)
             trade_count += 1
 
     open_trades[:] = [t for t in open_trades if t not in closed]
-    
-    # Run analysis periodically (hourly)
-    current_time = time.time()
-    if current_time - last_analysis_time > ANALYSIS_INTERVAL:
-        analyze_trades()
-
-# ---------------------------
-# Trade Recording and Analysis
-# ---------------------------
-def write_trade_result(trade):
-    """Write trade result to CSV file with proper quoting."""
-    file_exists = Path(TRADE_FILE).exists()
-    
-    with open(TRADE_FILE, 'a', newline='') as csvfile:
-        fieldnames = [
-            'timestamp', 'action', 'entry_price', 'exit_price', 
-            'quantity', 'pnl', 'balance', 'market_regime', 
-            'volatility_state', 'pattern', 'intensity', 'hurst_exponent'
-        ]
-        # Use quoting to handle commas in fields
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames, quoting=csv.QUOTE_MINIMAL)
-        
-        if not file_exists:
-            writer.writeheader()
-            
-        # Use a consistent timestamp format
-        timestamp = trade.get('exit_time', trade.get('entry_time', datetime.now().isoformat()))
-            
-        writer.writerow({
-            'timestamp': timestamp,
-            'action': trade['action'],
-            'entry_price': trade['entry_price'],
-            'exit_price': trade.get('exit_price', 0),
-            'quantity': trade['quantity'],
-            'pnl': trade.get('pnl', 0),
-            'balance': current_balance,
-            'market_regime': trade.get('market_regime', market_regime),
-            'volatility_state': trade.get('volatility_state', volatility_state),
-            'pattern': trade.get('pattern', ''),
-            'intensity': trade.get('intensity', 0),
-            'hurst_exponent': trade.get('hurst_exponent', current_hurst if USE_HURST else None)
-        })
-
-def analyze_trades():
-    """Analyze batch of trades and save results."""
-    global trade_count, last_analysis_time
-    
-    if not Path(TRADE_FILE).exists():
-        logger.info("No trades to analyze")
-        return
-    
-    try:
-        # Use error handling to skip problematic lines
-        df = pd.read_csv(TRADE_FILE, on_bad_lines='skip')
-        
-        if df.empty:
-            logger.info("No trades to analyze")
-            return
-        
-        # Calculate metrics
-        total_trades = len(df)
-        winning_trades = df[df['pnl'] > 0]
-        losing_trades = df[df['pnl'] < 0]
-        win_rate = len(winning_trades) / total_trades * 100 if total_trades > 0 else 0
-        total_pnl = df['pnl'].sum()
-        avg_pnl = df['pnl'].mean()
-        max_win = df['pnl'].max()
-        max_loss = df['pnl'].min()
-        
-        # Calculate profit factor
-        gross_profit = winning_trades['pnl'].sum() if not winning_trades.empty else 0
-        gross_loss = abs(losing_trades['pnl'].sum()) if not losing_trades.empty else 0
-        profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
-        
-        # Calculate drawdown
-        df['cum_pnl'] = df['pnl'].cumsum()
-        df['peak'] = df['cum_pnl'].cummax()
-        df['drawdown'] = df['peak'] - df['cum_pnl']
-        max_drawdown = df['drawdown'].max()
-        
-        # Analyze by Hurst exponent if available
-        hurst_analysis = {}
-        if 'hurst_exponent' in df.columns and not df['hurst_exponent'].isna().all():
-            trending_trades = df[df['hurst_exponent'] > 0.5]
-            mean_reverting_trades = df[df['hurst_exponent'] <= 0.5]
-            
-            if not trending_trades.empty:
-                hurst_analysis['trending'] = {
-                    'count': len(trending_trades),
-                    'win_rate': len(trending_trades[trending_trades['pnl'] > 0]) / len(trending_trades) * 100,
-                    'avg_pnl': trending_trades['pnl'].mean()
-                }
-            
-            if not mean_reverting_trades.empty:
-                hurst_analysis['mean_reverting'] = {
-                    'count': len(mean_reverting_trades),
-                    'win_rate': len(mean_reverting_trades[mean_reverting_trades['pnl'] > 0]) / len(mean_reverting_trades) * 100,
-                    'avg_pnl': mean_reverting_trades['pnl'].mean()
-                }
-        
-        # Prepare analysis results
-        analysis = {
-            'timestamp': datetime.now().isoformat(),
-            'total_trades': total_trades,
-            'winning_trades': len(winning_trades),
-            'losing_trades': len(losing_trades),
-            'win_rate': win_rate,
-            'total_pnl': total_pnl,
-            'avg_pnl': avg_pnl,
-            'max_win': max_win,
-            'max_loss': max_loss,
-            'profit_factor': profit_factor,
-            'max_drawdown': max_drawdown,
-            'final_balance': current_balance,
-            'hurst_analysis': hurst_analysis
-        }
-        
-        # Save to file
-        file_exists = Path(ANALYSIS_FILE).exists()
-        with open(ANALYSIS_FILE, 'a' if file_exists else 'w', newline='') as f:
-            if not file_exists:
-                f.write("timestamp,total_trades,winning_trades,losing_trades,win_rate,total_pnl,avg_pnl,max_win,max_loss,profit_factor,max_drawdown,final_balance\n")
-            
-            f.write(
-                f"{analysis['timestamp']},{analysis['total_trades']},{analysis['winning_trades']},"
-                f"{analysis['losing_trades']},{analysis['win_rate']:.2f},{analysis['total_pnl']:.4f},"
-                f"{analysis['avg_pnl']:.4f},{analysis['max_win']:.4f},{analysis['max_loss']:.4f},"
-                f"{analysis['profit_factor']:.2f},{analysis['max_drawdown']:.4f},{analysis['final_balance']:.4f}\n"
-            )
-        
-        # Print Hurst analysis if available
-        if hurst_analysis:
-            logger.info("Hurst Exponent Analysis:")
-            for regime, stats in hurst_analysis.items():
-                logger.info(f"  {regime.capitalize()} Market: {stats['count']} trades, "
-                           f"Win Rate: {stats['win_rate']:.2f}%, Avg PnL: ${stats['avg_pnl']:.4f}")
-        
-        # Update last analysis time
-        last_analysis_time = time.time()
-        
-    except Exception as e:
-        logger.error(f"Error analyzing trades: {e}")
-        # If there's an error with the current CSV file, create a backup and start fresh
-        try:
-            backup_file = f"{TRADE_FILE}.backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            logger.info(f"Creating backup of trades file at {backup_file}")
-            shutil.copy2(TRADE_FILE, backup_file)
-            
-            # Create a new empty file with just the header
-            with open(TRADE_FILE, 'w', newline='') as csvfile:
-                fieldnames = [
-                    'timestamp', 'action', 'entry_price', 'exit_price', 
-                    'quantity', 'pnl', 'balance', 'market_regime', 
-                    'volatility_state', 'pattern', 'intensity', 'hurst_exponent'
-                ]
-                writer = csv.DictWriter(csvfile, fieldnames=fieldnames, quoting=csv.QUOTE_MINIMAL)
-                writer.writeheader()
-                
-            logger.info("Created new trades file with header only")
-        except Exception as backup_error:
-            logger.error(f"Failed to create backup: {backup_error}")
 
 # ---------------------------
 # Backtesting Functionality
 # ---------------------------
 async def run_backtest(async_client):
     """Run backtest using historical data."""
-    global current_balance, backtest_results, candle_data, price_history, lrc_prices, current_hurst
+    global current_balance, candle_data, price_history, lrc_prices, current_hurst
     
     logger.info(f"Starting backtest for the last {BACKTEST_DAYS} days...")
     
     # Reset state
     current_balance = INITIAL_BALANCE
     open_trades.clear()
-    backtest_results.clear()
     candle_data.clear()
     price_history.clear()
     lrc_prices.clear()
@@ -1764,19 +1582,9 @@ async def run_backtest(async_client):
         # Track trades on current price
         await track_trades(current_price)
     
-    # Save backtest results
-    with open(BACKTEST_FILE, 'w') as f:
-        json.dump(backtest_results, f, indent=2)
-    
     # Calculate performance metrics
-    if backtest_results:
-        total_trades = len(backtest_results)
-        winning_trades = sum(1 for r in backtest_results if r['pnl'] > 0)
-        win_rate = (winning_trades / total_trades) * 100 if total_trades > 0 else 0
-        total_pnl = sum(r['pnl'] for r in backtest_results)
-        avg_pnl = total_pnl / total_trades if total_trades > 0 else 0
-        
-        logger.info(f"Backtest completed. Total trades: {total_trades}, Win rate: {win_rate:.2f}%, Total PnL: ${total_pnl:.4f}, Avg PnL: ${avg_pnl:.4f}, Final Balance: ${current_balance:.4f}")
+    if trade_count > 0:
+        logger.info(f"Backtest completed. Total trades: {trade_count}, Final Balance: ${current_balance:.4f}")
     else:
         logger.info("Backtest completed. No trades were executed.")
 
@@ -1875,13 +1683,6 @@ async def process_message(message, async_client):
     
     except Exception as e:
         logger.error(f"Error processing message: {e}")
-        if DEBUG_MODE:
-            debug_data['errors'].append({
-                'timestamp': datetime.now().isoformat(),
-                'error': str(e),
-                'traceback': traceback.format_exc(),
-                'message': message
-            })
     finally:
         # Update processing statistics
         processing_time = time.time() - start_time
@@ -1910,12 +1711,6 @@ async def message_processor(async_client):
             continue
         except Exception as e:
             logger.error(f"Error in message processor: {e}")
-            if DEBUG_MODE:
-                debug_data['errors'].append({
-                    'timestamp': datetime.now().isoformat(),
-                    'error': str(e),
-                    'traceback': traceback.format_exc()
-                })
             await asyncio.sleep(0.1)
 
 async def websocket_listener(async_client):
@@ -1991,9 +1786,17 @@ async def websocket_listener(async_client):
             except Exception as e:
                 logger.error(f"Error closing WebSocket socket: {e}")
             
-            # Clean up the socket manager
+            # Clean up the socket manager - Fixed the main issue here
             try:
-                await ws_manager.close()
+                # Check if the manager has a close method
+                if hasattr(ws_manager, 'close'):
+                    await ws_manager.close()
+                # Alternative method for different versions of the library
+                elif hasattr(ws_manager, 'stop'):
+                    await ws_manager.stop()
+                # If neither method exists, just let it be garbage collected
+                else:
+                    logger.debug("WebSocket manager has no close or stop method")
             except Exception as e:
                 logger.error(f"Error closing WebSocket manager: {e}")
             
@@ -2012,7 +1815,15 @@ async def websocket_listener(async_client):
             # Clean up the socket manager if it exists
             if ws_manager:
                 try:
-                    await ws_manager.close()
+                    # Check if the manager has a close method
+                    if hasattr(ws_manager, 'close'):
+                        await ws_manager.close()
+                    # Alternative method for different versions of the library
+                    elif hasattr(ws_manager, 'stop'):
+                        await ws_manager.stop()
+                    # If neither method exists, just let it be garbage collected
+                    else:
+                        logger.debug("WebSocket manager has no close or stop method")
                 except Exception as e:
                     logger.error(f"Error closing WebSocket manager during cleanup: {e}")
             
@@ -2315,12 +2126,6 @@ async def main():
                 break
             except Exception as e:
                 logger.error(f"Error in main loop: {e}")
-                if DEBUG_MODE:
-                    debug_data['errors'].append({
-                        'timestamp': datetime.now().isoformat(),
-                        'error': str(e),
-                        'traceback': traceback.format_exc()
-                    })
                 
                 # Wait before retrying
                 logger.info("Waiting 30 seconds before retrying...")
@@ -2351,18 +2156,6 @@ async def main():
             except Exception:
                 pass
         logger.info("Client closed. Exiting.")
-        
-        # Save debug data if enabled
-        if DEBUG_MODE and SAVE_DEBUG_DATA:
-            try:
-                with open(f"debug_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json", 'w') as f:
-                    json.dump(debug_data, f, indent=2)
-                logger.info("Debug data saved to file")
-            except Exception as e:
-                logger.error(f"Error saving debug data: {e}")
-        
-        # Run final analysis
-        analyze_trades()
 
 # Entrypoint
 if __name__ == "__main__":
@@ -2373,15 +2166,3 @@ if __name__ == "__main__":
         logger.info("Bot stopped by user (KeyboardInterrupt).")
     except Exception as e:
         logger.error(f"Unhandled exception: {e}")
-        if DEBUG_MODE:
-            debug_data['errors'].append({
-                'timestamp': datetime.now().isoformat(),
-                'error': str(e),
-                'traceback': traceback.format_exc()
-            })
-            try:
-                with open(f"debug_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json", 'w') as f:
-                    json.dump(debug_data, f, indent=2)
-                logger.info("Debug data saved to file")
-            except Exception as e:
-                logger.error(f"Error saving debug data: {e}")
